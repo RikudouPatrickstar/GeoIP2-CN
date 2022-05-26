@@ -1,0 +1,83 @@
+name: Update China IP list and generate GeoIP2 database
+
+on:
+  push:
+    branches: 
+      - master
+    paths:
+      - '.github/workflows/**'
+  workflow_dispatch:
+  schedule:
+    - cron: '0 16 * * *'
+env:
+  TZ: Asia/Shanghai
+jobs:
+  build:
+    name: Generate GeoIP2 database
+    runs-on: ubuntu-latest
+    steps:
+    - name: Set up Go 1.x
+      uses: actions/setup-go@v2
+      with:
+        go-version: ^1.14
+      id: go
+    - name: Check out code into the Go module directory
+      uses: actions/checkout@v2
+    - name: Get dependencies
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo -E apt-get update -y
+        sudo -E apt-get install -y aggregate
+        go get -v -t -d ./...
+        if [ -f Gopkg.toml ]; then
+            curl https://raw.githubusercontent.com/golang/dep/master/install.sh | sh
+            dep ensure
+        fi
+    - name: Compile GeoIP conversion bin (Golang)
+      run: |
+        mkdir -p dist
+        ./build.sh
+    - name: Obtain CN IP lists
+      run: |
+        cd dist
+        curl -LR "https://ftp.apnic.net/apnic/stats/apnic/delegated-apnic-latest" -o - | grep ipv4 | grep CN | awk -F\| '{ printf("%s/%d\n", $4, 32-log($5)/log(2)) }' > apnic.txt
+        curl -LR "https://github.com/17mon/china_ip_list/raw/master/china_ip_list.txt" -o ipip.txt
+        curl -LR "https://ispip.clang.cn/all_cn.txt" -o clang.txt
+        curl -LR "https://github.com/metowolf/iplist/raw/master/data/special/china.txt" -o chunzhen.txt
+        cat apnic.txt ipip.txt clang.txt chunzhen.txt | aggregate -q > cncidr.txt
+        cat cncidr.txt | sed "s_^_  - '_g;s_\$_'_g;1i payload:" > cncidr.yaml
+    - name: Generate GeoIP2 database
+      run: |
+        cd dist
+        ./ipip2mmdb -s ./cncidr.txt -d Country.mmdb
+    - name: Push artifacts to release branch
+      env:
+        TZ: Asia/Shanghai
+      run: |
+        git config --local user.email "68163551+RikudouPatrickstar@users.noreply.github.com"
+        git config --local user.name "RikudouPatrickstar"
+        git fetch
+        git checkout release
+        git checkout --orphan release-orphan
+        git rm -rf .
+        cp -rf dist/cncidr.txt ./
+        cp -rf dist/cncidr.yaml ./
+        cp -rf dist/Country.mmdb ./
+        git add Country.mmdb
+        git add cncidr.yaml
+        git add cncidr.txt
+        git commit -am "Updated at $( date +%Y/%m/%d\ %H:%M:%S)"
+        git branch -D release
+        git branch -m release
+    - name: GitHub Push
+      uses: ad-m/github-push-action@v0.6.0
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        branch: release
+        force: true
+    - name: Cleanup Workflow
+      uses: Mattraks/delete-workflow-runs@main
+      with:
+        retain_days: 1
+        keep_minimum_runs: 1
